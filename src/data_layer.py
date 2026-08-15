@@ -61,6 +61,3 @@ def load_price_data(ticker="AAPL", period="2y"):
     df = normalize_features(df, columns=["Close", "MA10", "RSI", "MACD", "MACD_Signal"])
 
     return df.reset_index(drop=True)
-
-df = load_price_data()
-print(df)

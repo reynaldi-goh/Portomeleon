@@ -38,11 +38,10 @@ class TradingEnv(gym.Env):
         super().reset(seed=seed)
         self.current_step = 0
         self.cash = self.initial_cash
-        # shares held per ticker, starts at 0 for everything
         self.shares_held = {ticker: 0 for ticker in self.tickers}
         self.portfolio_value = self.initial_cash
-        # what actually happened per ticker (may differ from what the agent wanted)
         self.effective_action = {ticker: 0 for ticker in self.tickers}
+        self.stock_values = {ticker: 0.0 for ticker in self.tickers}
 
         return self._get_obs(), self._get_info()
 
@@ -77,14 +76,8 @@ class TradingEnv(gym.Env):
         }
 
     def step(self, actions):
-        """
-        actions: dict of {ticker: (action, size_fraction)}
-            action: 0 = hold, 1 = buy, 2 = sell
-            size_fraction: confidence-based fraction already computed by the agent
-                           (e.g. via margin_to_size), between 0 and 1
-        """
         prev_value = self.portfolio_value
-        # lock in today's prices before anything moves the day forward
+        prev_stock_values = dict(self.stock_values)
         today_prices = {t: self._get_price(t) for t in self.tickers}
 
         buy_tickers = [t for t, (a, _) in actions.items() if a == 1]
@@ -94,7 +87,6 @@ class TradingEnv(gym.Env):
         for ticker in hold_tickers:
             self.effective_action[ticker] = 0
 
-        # sells execute independently, same logic as the single-stock version
         for ticker in sell_tickers:
             _, size_fraction = actions[ticker]
             price = today_prices[ticker]
@@ -104,14 +96,11 @@ class TradingEnv(gym.Env):
                 self.shares_held[ticker] -= shares_to_sell
                 self.effective_action[ticker] = 2
             else:
-                self.effective_action[ticker] = 0  # less than 1 share, counts as hold
+                self.effective_action[ticker] = 0
 
-        # buys are pooled and split proportionally by relative confidence
         if buy_tickers:
             size_fractions = {t: actions[t][1] for t in buy_tickers}
             total_size = sum(size_fractions.values())
-
-            # cash pool: combined confidence across all buy signals, capped at available cash
             cash_pool = min(total_size, 1.0) * self.cash
 
             for ticker in buy_tickers:
@@ -124,19 +113,28 @@ class TradingEnv(gym.Env):
                     self.shares_held[ticker] += shares_to_buy
                     self.effective_action[ticker] = 1
                 else:
-                    self.effective_action[ticker] = 0  # not enough cash for even 1 share
+                    self.effective_action[ticker] = 0
 
-        # advance one day for the whole portfolio
         self.current_step += 1
 
-        # portfolio value uses today's prices, since that's when the trades happened
         self.portfolio_value = self.cash + sum(
             self.shares_held[t] * today_prices[t] for t in self.tickers
         )
+
+        self.stock_values = {t: self.shares_held[t] * today_prices[t] for t in self.tickers}
+        stock_rewards = {}
+        for t in self.tickers:
+            if prev_stock_values[t] > 0:
+                stock_rewards[t] = (self.stock_values[t] - prev_stock_values[t]) / prev_stock_values[t]
+            else:
+                stock_rewards[t] = 0.0
 
         reward = (self.portfolio_value - prev_value) / prev_value
 
         terminated = False
         truncated = self.current_step >= self.n_steps - 1
 
-        return self._get_obs(), reward, terminated, truncated, self._get_info()
+        info = self._get_info()
+        info["stock_rewards"] = stock_rewards
+
+        return self._get_obs(), reward, terminated, truncated, info

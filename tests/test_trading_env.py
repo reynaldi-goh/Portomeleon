@@ -87,3 +87,56 @@ def test_episode_ends_at_last_step():
         obs, reward, terminated, truncated, info = env.step(actions)
         steps_taken += 1
     assert steps_taken == env.n_steps - 1
+
+# ---------- Per-stock reward (info["stock_rewards"]) ----------
+
+def test_stock_rewards_present_in_info():
+    env = make_env()
+    env.reset()
+    actions = {"AAPL": (1, 0.5), "TSLA": (1, 0.3)}
+    obs, reward, terminated, truncated, info = env.step(actions)
+
+    assert "stock_rewards" in info
+    assert set(info["stock_rewards"].keys()) == {"AAPL", "TSLA"}
+
+
+def test_stock_rewards_zero_on_first_buy():
+    # a stock going from 0 shares to some shares has no prior position
+    # to compare against, so its first-step reward should be 0.0
+    env = make_env()
+    env.reset()
+    actions = {"AAPL": (1, 0.5), "TSLA": (0, 0.0)}
+    obs, reward, terminated, truncated, info = env.step(actions)
+
+    assert info["stock_rewards"]["AAPL"] == 0.0
+    assert info["stock_rewards"]["TSLA"] == 0.0
+
+
+def test_stock_rewards_differ_per_stock():
+    # build a scenario where one stock rises and another falls,
+    # after both already hold a position, so rewards should genuinely differ
+    env = make_env()
+    env.reset()
+
+    # day 1: buy into both, establishing a position
+    env.step({"AAPL": (1, 0.9), "TSLA": (1, 0.9)})
+
+    # day 2: hold both, but prices moved differently for each (AAPL up, TSLA down
+    # in the fake data set up in make_env)
+    obs, reward, terminated, truncated, info = env.step(
+        {"AAPL": (0, 0.0), "TSLA": (0, 0.0)}
+    )
+
+    aapl_reward = info["stock_rewards"]["AAPL"]
+    tsla_reward = info["stock_rewards"]["TSLA"]
+    assert aapl_reward != tsla_reward
+
+
+def test_stock_rewards_reset_correctly_between_episodes():
+    env = make_env()
+    env.reset()
+    env.step({"AAPL": (1, 0.5), "TSLA": (0, 0.0)})
+
+    # start a fresh episode
+    obs, info = env.reset()
+    assert env.stock_values == {t: 0.0 for t in env.tickers}

@@ -41,7 +41,6 @@ class TradingEnv(gym.Env):
         self.shares_held = {ticker: 0 for ticker in self.tickers}
         self.portfolio_value = self.initial_cash
         self.effective_action = {ticker: 0 for ticker in self.tickers}
-        self.stock_values = {ticker: 0.0 for ticker in self.tickers}
 
         return self._get_obs(), self._get_info()
 
@@ -77,7 +76,14 @@ class TradingEnv(gym.Env):
 
     def step(self, actions):
         prev_value = self.portfolio_value
-        prev_stock_values = dict(self.stock_values)
+        prev_shares = dict(self.shares_held)  # shares held BEFORE today's trades
+
+        # yesterday's price, used to compute this stock's real price return today
+        yesterday_prices = (
+            {t: self._get_price(t, step=self.current_step - 1) for t in self.tickers}
+            if self.current_step > 0
+            else {t: self._get_price(t) for t in self.tickers}
+        )
         today_prices = {t: self._get_price(t) for t in self.tickers}
 
         buy_tickers = [t for t, (a, _) in actions.items() if a == 1]
@@ -121,11 +127,12 @@ class TradingEnv(gym.Env):
             self.shares_held[t] * today_prices[t] for t in self.tickers
         )
 
-        self.stock_values = {t: self.shares_held[t] * today_prices[t] for t in self.tickers}
+        # price-return-based reward, using shares held BEFORE today's trade,
+        # so buying/selling itself never counts as a reward or penalty
         stock_rewards = {}
         for t in self.tickers:
-            if prev_stock_values[t] > 0:
-                stock_rewards[t] = (self.stock_values[t] - prev_stock_values[t]) / prev_stock_values[t]
+            if prev_shares[t] > 0:
+                stock_rewards[t] = (today_prices[t] - yesterday_prices[t]) / yesterday_prices[t]
             else:
                 stock_rewards[t] = 0.0
 

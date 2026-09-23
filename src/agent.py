@@ -35,7 +35,7 @@ class QNetwork(nn.Module):
 class ReplayBuffer:
     """Stores past experiences and samples random batches for training."""
 
-    def __init__(self, capacity=10000):
+    def __init__(self, capacity=50000):
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done):
@@ -56,8 +56,45 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-# track margins seen during training, for debugging the scale parameter below
+class MarginScaler:
+    """Turns a raw Q-value margin into a 0-1 confidence by ranking it against
+    recent margins: "how sure is this decision compared to the bot's usual ones?"
+
+    This replaces the fixed 0.02 scale, so trade size no longer depends on how
+    big the Q-values happen to be (which changed with alpha).
+    Keep it with the trained model, and freeze() it after training so the
+    frozen model sizes trades against the margins it ended training with.
+    """
+
+    def __init__(self, capacity=2000, min_samples=30):
+        self.capacity = capacity
+        self.min_samples = min_samples
+        self.buf = np.zeros(capacity)   # rolling window of recent margins
+        self.count = 0                  # how many margins are stored (max = capacity)
+        self.next_slot = 0
+        self.frozen = False
+
+    def update(self, margin):
+        # remember this margin, overwriting the oldest once the window is full
+        if self.frozen:
+            return
+        self.buf[self.next_slot] = margin
+        self.next_slot = (self.next_slot + 1) % self.capacity
+        self.count = min(self.count + 1, self.capacity)
+
+    def confidence(self, margin):
+        # share of remembered margins that are <= this one (0 = weakest, 1 = strongest)
+        if self.count < self.min_samples:
+            return 0.5  # not enough history yet, use a neutral middle size
+        return float(np.mean(self.buf[:self.count] <= margin))
+
+    def freeze(self):
+        self.frozen = True
+
+
+# track margins and trade sizes seen during training, for debugging
 _margin_log = []
+_size_log = []
 
 
 def margin_to_size(margin, min_size=0.01, max_size=0.90, scale=0.02):
@@ -67,8 +104,12 @@ def margin_to_size(margin, min_size=0.01, max_size=0.90, scale=0.02):
 
 
 def select_action_and_size(state, q_net, epsilon, n_actions, min_size=0.01, max_size=0.90,
-                            log_margin=False):
-    """Epsilon-greedy action choice, plus a confidence-based trade size, for a single stock."""
+                            log_margin=False, scaler=None):
+    """Epsilon-greedy action choice, plus a confidence-based trade size, for a single stock.
+
+    scaler: a MarginScaler. If given, trade size comes from how this margin ranks
+    against recent margins. If None, the old fixed scale of 0.02 is used.
+    """
     if random.random() < epsilon:
         action = random.randint(0, n_actions - 1)
         size_fraction = random.uniform(min_size, max_size)
@@ -86,11 +127,19 @@ def select_action_and_size(state, q_net, epsilon, n_actions, min_size=0.01, max_
     runner_up_q = max(q_values[i].item() for i in other_actions)
     margin = q_values[action].item() - runner_up_q
 
-    # record the raw margin so we can check whether scale=0.02 is saturating confidence
+    if scaler is not None:
+        # rank this margin against recent ones, then remember it (no-op if frozen)
+        confidence = scaler.confidence(margin)
+        scaler.update(margin)
+        size_fraction = min_size + confidence * (max_size - min_size)
+    else:
+        size_fraction = margin_to_size(margin, min_size=min_size, max_size=max_size, scale=0.02)
+
+    # record the raw margin and the size it produced, for the training printout
     if log_margin:
         _margin_log.append(margin)
+        _size_log.append(size_fraction)
 
-    size_fraction = margin_to_size(margin, min_size=min_size, max_size=max_size, scale=0.02)
     return action, size_fraction
 
 
@@ -99,28 +148,32 @@ def get_margin_stats():
     if not _margin_log:
         return None
     arr = np.array(_margin_log)
+    sizes = np.array(_size_log)
     return {
         "count": len(arr),
         "min": arr.min(),
         "mean": arr.mean(),
         "max": arr.max(),
-        "pct_saturated": float(np.mean(arr >= 0.02)),  # fraction hitting max confidence
+        "pct_saturated": float(np.mean(arr >= 0.02)),  # raw margins at or above the old fixed cap
+        "mean_size": float(sizes.mean()),
+        "pct_near_max_size": float(np.mean(sizes >= 0.80)),  # trades sized at 80% or more
     }
 
 
 def reset_margin_log():
-    # clear collected margins, so stats can be reported per-combo rather than cumulative
+    # clear collected margins and sizes, so stats can be reported per-combo rather than cumulative
     _margin_log.clear()
+    _size_log.clear()
 
 
 def select_portfolio_actions(obs_dict, q_net, epsilon, n_actions, min_size=0.01, max_size=0.90,
-                              log_margin=False):
+                              log_margin=False, scaler=None):
     """Runs select_action_and_size once per ticker, using the same trained network."""
     actions = {}
     for ticker, state in obs_dict.items():
         actions[ticker] = select_action_and_size(
             state, q_net, epsilon, n_actions, min_size=min_size, max_size=max_size,
-            log_margin=log_margin
+            log_margin=log_margin, scaler=scaler
         )
     return actions
 

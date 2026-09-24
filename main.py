@@ -12,9 +12,25 @@ Three stages, matching the Portomeleon app design:
 3. Simulation, the BEST scoring model, run day by day across a user-chosen
    portfolio drawn from the TRAINING basket (Option A: the app's actual
    product constraint). This is the deployment/demo view.
+
+Model persistence: stage 1+2 (hyperparameter search + training) is the
+expensive part. Once a best model is found, its weights and frozen
+MarginScaler are saved to disk (see save_model/load_model below), so later
+runs can skip straight to stage 3 instead of retraining from scratch.
 """
 
+import os
+import pickle
+
+from dotenv import load_dotenv
+load_dotenv()  # reads .env in the current directory and sets its vars into
+                # os.environ, e.g. GROQ_API_KEY -- so `advisor.py`'s
+                # os.environ.get("GROQ_API_KEY") picks it up without you
+                # needing to `export` it in the shell every session
+
 import numpy as np
+import torch
+
 from src.data_layer import load_training_basket, load_test_basket, align_dates
 from src.trading_env import TradingEnv
 from src.agent import (
@@ -27,6 +43,7 @@ from src.agent import (
     get_margin_stats,
     reset_margin_log,
 )
+from src.advisor import Advisor, build_day_facts
 
 # fix a seed so every hyperparameter combo starts from the same random state,
 # making the grid an actual controlled comparison instead of luck
@@ -62,6 +79,9 @@ HYPERPARAM_GRID = [
     {"alpha": 0.5, "n_episodes": 50},
     {"alpha": 0.8, "n_episodes": 50},
 ]
+
+# where the trained model (weights + scaler) is cached between runs
+MODEL_PATH = "trained_model.pt"
 
 
 def train(env, q_net, target_net, optimizer, loss_fn, n_actions,
@@ -104,7 +124,7 @@ def train(env, q_net, target_net, optimizer, loss_fn, n_actions,
                 )
                 buffer.push(
                     obs_dict[ticker],
-                    info["effective_action"][ticker], 
+                    info["effective_action"][ticker],
                     blended_reward,
                     next_obs_dict[ticker],
                     done,
@@ -166,12 +186,14 @@ def compute_buy_and_hold_value(price_data, tickers, initial_cash, step):
 
 
 def run_stepper(env, q_net, n_actions, price_data, interactive=True, label="Run", verbose=True,
-                scaler=None):
+                scaler=None, advisor=None):
     """Steps the trained (frozen, epsilon=0) model through price_data day by
     day. Used for both test scoring (unseen tickers) and simulation
     (training-basket tickers, full period).
 
-    scaler: the model's frozen MarginScaler, so trade sizing matches training."""
+    scaler: the model's frozen MarginScaler, so trade sizing matches training.
+    advisor: an Advisor. If given (and interactive), typing 'why' after a day
+    explains that day's decisions in plain language."""
     obs_dict, info = env.reset()
     done = False
 
@@ -199,10 +221,29 @@ def run_stepper(env, q_net, n_actions, price_data, interactive=True, label="Run"
             print(f"  Cash: ${info['cash']:.2f} | Shares: {info['shares_held']}")
             print(f"  Drawdown from peak: {drawdown:.1%} | Rolling Sharpe (last {env.sharpe_window}d): {sharpe_note}")
 
+        # remember what the bot saw before it acts, so the advisor can explain it afterwards
+        explain = advisor is not None and interactive
+        if explain:
+            decision_day = env.current_step
+            states_seen = obs_dict
+            raw_rows = {t: price_data[t].iloc[decision_day] for t in env.tickers}
+            shares_before = dict(info["shares_held"])
+            portfolio_note = {
+                "value": round(info["portfolio_value"], 2),
+                "return_since_start_pct": round(cumulative_return * 100, 2),
+                "buy_and_hold_value": round(benchmark_value, 2),
+                "drawdown_pct": round(drawdown * 100, 2),
+            }
+
         actions = select_portfolio_actions(obs_dict, q_net, epsilon=0.0, n_actions=n_actions,
                                             scaler=scaler)
         obs_dict, reward, terminated, truncated, info = env.step(actions)
         done = terminated or truncated
+
+        day_facts = None
+        if explain:
+            day_facts = build_day_facts(decision_day, env.tickers, states_seen, q_net, actions,
+                                        info, raw_rows, shares_before, portfolio_note)
 
         if verbose:
             for ticker in env.tickers:
@@ -213,7 +254,14 @@ def run_stepper(env, q_net, n_actions, price_data, interactive=True, label="Run"
                 print(f"  {ticker}: wanted {wanted} | did {did}{size_note} | stock reward: {stock_reward:+.2%}")
 
         if interactive:
-            input("Press Enter for next day...")
+            prompt = "Press Enter for next day"
+            prompt += ", or type 'why' for the advisor's explanation: " if day_facts else "..."
+            while True:
+                choice = input(prompt).strip().lower()
+                if choice == "why" and day_facts is not None:
+                    print("\n" + advisor.explain_day(day_facts) + "\n")
+                    continue
+                break
 
     final_benchmark = compute_buy_and_hold_value(
         price_data, env.tickers, env.initial_cash, env.current_step
@@ -349,8 +397,39 @@ def run_hyperparameter_search(training_tickers=TRAINING_TICKERS, test_baskets=TE
     return best_q_net, n_actions, train_data, results, best_scaler
 
 
+def save_model(path, q_net, scaler, obs_size, n_actions, best_combo):
+    """Saves everything needed to redeploy the trained model without
+    retraining: the network's weights, its frozen MarginScaler, and the
+    winning hyperparams (kept for the record, not required to reload).
+    """
+    torch.save({
+        "q_net_state_dict": q_net.state_dict(),
+        "obs_size": obs_size,
+        "n_actions": n_actions,
+        "scaler_bytes": pickle.dumps(scaler),  # MarginScaler isn't a torch module, so pickle it
+        "best_combo": best_combo,
+    }, path)
+    print(f"Saved model to {path}")
+
+
+def load_model(path, seed=RANDOM_SEED):
+    """Rebuilds the network architecture, then loads the trained weights and
+    scaler back onto it. Returns (q_net, n_actions, scaler, best_combo).
+    """
+    checkpoint = torch.load(path, weights_only=False)
+
+    q_net, _target_net, _optimizer, _loss_fn = build_agent(
+        checkpoint["obs_size"], checkpoint["n_actions"], seed=seed
+    )
+    q_net.load_state_dict(checkpoint["q_net_state_dict"])
+    q_net.eval()  # frozen for inference: no more learning or exploration
+
+    scaler = pickle.loads(checkpoint["scaler_bytes"])
+    return q_net, checkpoint["n_actions"], scaler, checkpoint["best_combo"]
+
+
 def simulate_user_portfolio(chosen_tickers, q_net, n_actions, train_data,
-                             initial_cash=10000, interactive=True, scaler=None):
+                             initial_cash=10000, interactive=True, scaler=None, advisor=None):
     """Stage 3: the best-scoring, frozen model manages a user-chosen portfolio
     drawn from the training basket, run across its full period. This is the
     deployment/demo view.
@@ -376,13 +455,32 @@ def simulate_user_portfolio(chosen_tickers, q_net, n_actions, train_data,
 
     return run_stepper(user_env, q_net, n_actions, user_data,
                         interactive=interactive, label="Simulation (full period)",
-                        scaler=scaler)
+                        scaler=scaler, advisor=advisor)
 
 
 if __name__ == "__main__":
-    # stage 1 + 2: search alpha and n_episodes, score on the 3 disjoint test baskets
-    q_net, n_actions, train_data, results, scaler = run_hyperparameter_search()
+    if os.path.exists(MODEL_PATH):
+        # a saved model exists: skip stage 1+2 entirely and go straight to stage 3
+        print(f"Loading saved model from {MODEL_PATH} (skipping search + training)...")
+        q_net, n_actions, scaler, best_combo = load_model(MODEL_PATH)
+
+        # still need train_data for stage 3 — this is just loading/normalizing
+        # price data, not training, so it stays cheap
+        train_data_raw, _ = load_training_basket(TRAINING_TICKERS)
+        train_data = align_dates(train_data_raw)
+        print(f"Loaded model trained with alpha={best_combo['alpha']}, "
+              f"n_episodes={best_combo['n_episodes']}")
+    else:
+        # no saved model yet: run the full stage 1+2 search, then cache the winner
+        q_net, n_actions, train_data, results, scaler = run_hyperparameter_search()
+        best_combo = max(results, key=lambda r: r["score"])
+        save_model(MODEL_PATH, q_net, scaler, obs_size=7, n_actions=n_actions,
+                   best_combo=best_combo)
 
     # stage 3: demo a user picking a smaller portfolio from the training basket
     user_choice = ["JPM", "JNJ", "XOM", "NVDA"]  # stand-in for real user input
-    simulate_user_portfolio(user_choice, q_net, n_actions, train_data, scaler=scaler)
+    # advisor layer: Groq if GROQ_API_KEY is set, built-in templates otherwise
+    advisor = Advisor()
+    print(f"\nAdvisor: {advisor.describe()}")
+    simulate_user_portfolio(user_choice, q_net, n_actions, train_data, scaler=scaler,
+                            advisor=advisor)

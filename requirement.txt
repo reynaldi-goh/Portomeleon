@@ -1,3 +1,6 @@
 yfinance
 pytest
 torch
+groq
+python-dotenv
+streamlit

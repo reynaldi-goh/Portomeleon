@@ -1,16 +1,5 @@
-"""Portomeleon UI — Iteration 7 (minimal version).
-
-Run from the project root, after a model has been trained and saved by main.py:
-
-    streamlit run app.py
-
-Three pages, switched with st.session_state.page (no sidebar):
-
-    dashboard --new simulation--> setup --start--> simulation --end--> dashboard
-
-Deferred to a later version: the specific-stock page and the company
-details page.
-"""
+# Iteration 6 - run the streamlit ui
+# streamlit run app.py
 
 import os
 import re
@@ -38,13 +27,11 @@ STEP_BUTTON_DAYS = 5
 st.set_page_config(page_title="Portomeleon", layout="centered")
 
 
-# ------------------------------------------------------------------- helpers
-
 @st.cache_resource(show_spinner="Loading the trained model...")
 def load_resources():
-    """Loaded once per app start, not on every click."""
+    # load model once per app start
     q_net, n_actions, scaler, _best_combo = load_model(MODEL_PATH)
-    # only needed for its scaling statistics, so any ticker can be scaled like the training data
+    # load reference basket for scaling
     _, train_reference = load_training_basket(TRAINING_TICKERS)
 
     def policy(obs_dict):
@@ -54,30 +41,35 @@ def load_resources():
     return {"q_net": q_net, "policy": policy, "reference": train_reference, "advisor": Advisor()}
 
 
+# switch page
 def go(page):
     st.session_state.page = page
     st.session_state.setup_msg = None
     st.rerun()
 
 
+# format a dollar amount
 def money(x):
     return f"${x:,.2f}"
 
 
+# format a drawdown percentage
 def drawdown_text(x):
     return "0.0%" if x < 0.0005 else f"-{x:.1%}"
 
 
+# format a sharpe ratio
 def sharpe_text(x):
     return "n/a (too few days)" if x is None else f"{x:.2f}"
 
 
+# format a date
 def fmt_date(d):
     return d.strftime("%d %b %Y") if hasattr(d, "strftime") else str(d)
 
 
+# format holdings rows for display
 def holdings_table(rows):
-    """Format the raw holdings rows for display."""
     return pd.DataFrame([{
         "Stock": r["Stock"],
         "Price": money(r["Price"]),
@@ -89,20 +81,21 @@ def holdings_table(rows):
     } for r in rows])
 
 
+# build a chart-ready frame from history
 def history_frame(history):
     actions = history.get("actions", [{}] * len(history["dates"]))
     return pd.DataFrame({
         "Date": pd.to_datetime(history["dates"]),
         "Bot portfolio": history["portfolio"],
         "Buy and hold": history["buy_and_hold"],
-        # a day counts as a "buy day" / "sell day" if the bot bought/sold ANY held stock
+        # flag buy/sell days
         "Buy day": [any(a == "BUY" for a in day.values()) for day in actions],
         "Sell day": [any(a == "SELL" for a in day.values()) for day in actions],
     })
 
 
+# draw the portfolio-vs-benchmark chart
 def history_chart(df):
-    """Portfolio-vs-benchmark line chart, with a marker on every day the bot bought or sold."""
     base = alt.Chart(df).encode(x=alt.X("Date:T", title=None))
     lines = base.transform_fold(
         ["Bot portfolio", "Buy and hold"], as_=["Series", "Value"]
@@ -119,15 +112,13 @@ def history_chart(df):
     return (lines + buys + sells).properties(height=320).interactive()
 
 
+# escape dollar signs before rendering text
 def show_text(text):
-    # streamlit reads $...$ as maths, which garbles dollar amounts, so escape it
     st.write(text.replace("$", "\\$"))
 
 
-# ---------------------------------------------------------------- setup page
-
+# add tickers typed or clicked by the user
 def add_tickers(text):
-    """Add one or more tickers typed or clicked by the user."""
     picked = st.session_state.picked
     for part in [p for p in re.split(r"[,\s]+", text.strip()) if p]:
         try:
@@ -144,21 +135,23 @@ def add_tickers(text):
     st.session_state.setup_msg = None
 
 
+# handle the add-ticker button
 def add_typed():
-    # runs as a button callback, so the warning it may set shows on this very rerun
     add_tickers(st.session_state.typed_tickers)
 
 
+# handle the dropdown selection
 def add_from_dropdown():
-    # runs as the multiselect's on_change callback
     add_tickers(" ".join(st.session_state.common_tickers_select))
 
 
+# remove a picked ticker
 def remove_ticker(t):
-    st.session_state.picked.remove(t)
+    if t in st.session_state.picked:
+        st.session_state.picked.remove(t)
     st.session_state.setup_msg = None
 
-
+# render the new-simulation setup page
 def page_setup(res):
     if st.button("← Back"):
         go("dashboard")
@@ -208,8 +201,7 @@ def page_setup(res):
         go("simulation")
 
 
-# ------------------------------------------------------------ simulation page
-
+# render the running-simulation page
 def page_simulation():
     sim = st.session_state.sim
     if sim is None:
@@ -273,8 +265,7 @@ def page_simulation():
             st.caption(f"Advisor: {sim.advisor.describe()}")
 
 
-# ------------------------------------------------------------- dashboard page
-
+# render the dashboard page
 def page_dashboard():
     top = st.columns([3, 1])
     top[0].header("Dashboard")
@@ -305,11 +296,10 @@ def page_dashboard():
     st.dataframe(holdings_table(last["holdings"]), hide_index=True)
 
 
-# ----------------------------------------------------------------------- main
-
 def main():
     st.title("Portomeleon")
 
+    # init session state
     if "page" not in st.session_state:
         st.session_state.page = "dashboard"
         st.session_state.sim = None
@@ -323,6 +313,7 @@ def main():
         st.stop()
     res = load_resources()
 
+    # route to the current page
     page = st.session_state.page
     if page == "setup":
         page_setup(res)
@@ -333,6 +324,5 @@ def main():
 
     st.divider()
     st.caption("Disclaimer: Educational project only")
-
 
 main()

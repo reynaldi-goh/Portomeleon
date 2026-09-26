@@ -7,10 +7,8 @@ import numpy as np
 class TradingEnv(gym.Env):
     """Gymnasium trading environment supporting multiple stocks.
 
-    Each trading day, the agent evaluates every stock independently and
-    produces an action plus a confidence-based size fraction for each.
-    Sells execute independently per stock. Buys are pooled and the
-    available cash is split across stocks proportionally to their
+    Each trading day, the agent evaluates every stock independently and produces an action plus a confidence-based size fraction for each.
+    Sells execute independently per stock. Buys are pooled and the available cash is split across stocks proportionally to their
     relative confidence (size fraction).
 
     Timing of one step (day k):
@@ -100,10 +98,6 @@ class TradingEnv(gym.Env):
         """Rolling Sharpe-style reward, penalized for drawdown from the episode's peak,
         with a small opportunity-cost penalty for sitting in cash, otherwise the agent
         can dodge the drawdown penalty for free by simply not being in the market.
-
-        prev_value: portfolio value right after today's trades (at today's close).
-        self.portfolio_value: value at the next day's close. The difference is
-        the return earned by the position chosen today.
         """
         # measure the return earned since the last trade
         raw_return = (self.portfolio_value - prev_value) / prev_value

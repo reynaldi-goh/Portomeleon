@@ -1,4 +1,4 @@
-"""Tests for the advisor layer (Iteration 4). No network, no torch needed."""
+"""Tests for the advisor layer: Iteration 6. No network, no torch needed."""
 
 from types import SimpleNamespace
 
@@ -34,10 +34,14 @@ def make_facts():
 
 
 class FakeClient:
-    """Mimics client.chat.completions.create(...) without any network."""
+    """Mimics client.chat.completions.create(...) without any network.
 
-    def __init__(self, text=None, error=None):
-        self.text, self.error, self.last_kwargs = text, error, None
+    finish_reason defaults to "stop" (a normal, complete reply), matching
+    what Advisor.explain_day() requires before it will trust the text.
+    """
+
+    def __init__(self, text=None, error=None, finish_reason="stop"):
+        self.text, self.error, self.finish_reason, self.last_kwargs = text, error, finish_reason, None
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs):
@@ -45,19 +49,20 @@ class FakeClient:
         if self.error:
             raise self.error
         message = SimpleNamespace(content=self.text)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        choice = SimpleNamespace(message=message, finish_reason=self.finish_reason)
+        return SimpleNamespace(choices=[choice], usage=None)
 
 
 def test_signal_notes_rsi_zones():
     assert "overbought" in signal_notes(make_row(rsi=75))[0]
     assert "oversold" in signal_notes(make_row(rsi=25))[0]
-    assert "neutral" in signal_notes(make_row(rsi=50))[0]
+    assert "ordinary" in signal_notes(make_row(rsi=50))[0]
 
 
 def test_signal_notes_price_vs_average_and_macd():
     notes = signal_notes(make_row(gap=-0.031, macd=-0.01, signal=0.0))
     assert "3.1% below its 10-day average" in notes[1]
-    assert "downward momentum" in notes[2]
+    assert "momentum was fading" in notes[2]
 
 
 def test_facts_record_wanted_did_and_share_change():
@@ -77,8 +82,6 @@ def test_missed_sell_explains_why():
 
 
 def test_missed_buy_explains_why():
-    facts = make_facts()
-    facts["stocks"][0]["did"] = "HOLD"
     from src.advisor import _mismatch_note
     assert "whole share" in _mismatch_note("BUY", "HOLD", 0)
 
@@ -118,4 +121,10 @@ def test_advisor_falls_back_when_api_fails():
 
 def test_advisor_falls_back_on_empty_reply():
     advisor = Advisor(client=FakeClient(text="   "))
+    assert "Groq unavailable" in advisor.explain_day(make_facts())
+
+
+def test_advisor_falls_back_on_truncated_reply():
+    # non-empty text but finish_reason != "stop" means it was cut off mid-thought
+    advisor = Advisor(client=FakeClient(text="AAA was b", finish_reason="length"))
     assert "Groq unavailable" in advisor.explain_day(make_facts())

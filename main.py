@@ -423,9 +423,6 @@ def simulate_user_portfolio(chosen_tickers, q_net, n_actions, train_data,
     """Stage 3: the best-scoring, frozen model manages a user-chosen portfolio
     drawn from the training basket, run across its full period. This is the
     deployment/demo view.
-
-    Option A: chosen_tickers must be a subset of the training basket, and
-    at most MAX_USER_PORTFOLIO_SIZE of them.
     """
     if len(chosen_tickers) == 0:
         raise ValueError("Choose at least 1 stock.")

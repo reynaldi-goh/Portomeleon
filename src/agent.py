@@ -1,4 +1,4 @@
-"""Agent: Q-network, replay buffer, action selection, and training step — Iteration 3."""
+"""Agent: Q-network, replay buffer, action selection, and training step: Iteration 3."""
 
 import random
 from collections import deque
@@ -59,18 +59,13 @@ class ReplayBuffer:
 class MarginScaler:
     """Turns a raw Q-value margin into a 0-1 confidence by ranking it against
     recent margins: "how sure is this decision compared to the bot's usual ones?"
-
-    This replaces the fixed 0.02 scale, so trade size no longer depends on how
-    big the Q-values happen to be (which changed with alpha).
-    Keep it with the trained model, and freeze() it after training so the
-    frozen model sizes trades against the margins it ended training with.
     """
 
     def __init__(self, capacity=2000, min_samples=30):
         self.capacity = capacity
         self.min_samples = min_samples
-        self.buf = np.zeros(capacity)   # rolling window of recent margins
-        self.count = 0                  # how many margins are stored (max = capacity)
+        self.buf = np.zeros(capacity)   # store a rolling window of recent margins
+        self.count = 0                  # count how many margins are stored (max = capacity)
         self.next_slot = 0
         self.frozen = False
 
@@ -83,9 +78,9 @@ class MarginScaler:
         self.count = min(self.count + 1, self.capacity)
 
     def confidence(self, margin):
-        # share of remembered margins that are <= this one (0 = weakest, 1 = strongest)
+        # measure the share of remembered margins that are <= this one (0 = weakest, 1 = strongest)
         if self.count < self.min_samples:
-            return 0.5  # not enough history yet, use a neutral middle size
+            return 0.5  # fall back to a neutral middle size until there's enough history
         return float(np.mean(self.buf[:self.count] <= margin))
 
     def freeze(self):
@@ -154,9 +149,9 @@ def get_margin_stats():
         "min": arr.min(),
         "mean": arr.mean(),
         "max": arr.max(),
-        "pct_saturated": float(np.mean(arr >= 0.02)),  # raw margins at or above the old fixed cap
+        "pct_saturated": float(np.mean(arr >= 0.02)),  # measure the share at or above the old fixed cap
         "mean_size": float(sizes.mean()),
-        "pct_near_max_size": float(np.mean(sizes >= 0.80)),  # trades sized at 80% or more
+        "pct_near_max_size": float(np.mean(sizes >= 0.80)),  # measure the share sized at 80% or more
     }
 
 

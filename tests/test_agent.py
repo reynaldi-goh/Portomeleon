@@ -1,9 +1,10 @@
-"""Unit tests for the DQN agent — Iteration 3."""
+"""Unit tests for the DQN agent: Iteration 3."""
 import numpy as np
 import torch
 from src.agent import (
     QNetwork,
     ReplayBuffer,
+    MarginScaler,
     margin_to_size,
     select_action_and_size,
     select_portfolio_actions,
@@ -57,6 +58,49 @@ def test_replay_buffer_sample_shapes():
     assert rewards.shape == (8,)
     assert next_states.shape == (8, 7)
     assert dones.shape == (8,)
+
+
+# ---------- MarginScaler ----------
+
+def test_marginscaler_returns_neutral_confidence_before_min_samples():
+    # fewer than min_samples margins seen so far should fall back to 0.5
+    scaler = MarginScaler(capacity=100, min_samples=10)
+    for _ in range(5):
+        scaler.update(0.03)
+    assert scaler.confidence(0.03) == 0.5
+
+
+def test_marginscaler_confidence_ranks_against_history():
+    # once enough history exists, confidence should reflect where a margin ranks
+    scaler = MarginScaler(capacity=100, min_samples=5)
+    for margin in [0.01, 0.02, 0.03, 0.04, 0.05]:
+        scaler.update(margin)
+
+    low_confidence = scaler.confidence(0.0)   # below every stored margin
+    high_confidence = scaler.confidence(1.0)  # above every stored margin
+    assert low_confidence < high_confidence
+    assert high_confidence == 1.0
+
+
+def test_marginscaler_freeze_stops_updates():
+    # once frozen, new margins should not change what confidence() reports
+    scaler = MarginScaler(capacity=100, min_samples=5)
+    for margin in [0.01, 0.02, 0.03, 0.04, 0.05]:
+        scaler.update(margin)
+    scaler.freeze()
+
+    before = scaler.confidence(0.03)
+    scaler.update(100.0)  # should be ignored now that the scaler is frozen
+    after = scaler.confidence(0.03)
+    assert before == after
+
+
+def test_marginscaler_count_caps_at_capacity():
+    # pushing more margins than capacity should not grow count past capacity
+    scaler = MarginScaler(capacity=10, min_samples=1)
+    for i in range(50):
+        scaler.update(float(i))
+    assert scaler.count == 10
 
 
 # ---------- margin_to_size ----------
@@ -113,6 +157,21 @@ def test_select_action_and_size_full_exploration_is_random():
     action, size_fraction = select_action_and_size(state, net, epsilon=1.0, n_actions=3)
     assert action in (0, 1, 2)
     assert 0.0 <= size_fraction <= 0.90
+
+
+def test_select_action_and_size_uses_scaler_when_given():
+    # with a scaler passed in, size should come from ranked confidence, not the fixed scale
+    net = QNetwork(obs_size=7, n_actions=3)
+    with torch.no_grad():
+        net.net[-1].bias[:] = torch.tensor([-10.0, 10.0, -10.0])
+        net.net[-1].weight[:] = 0.0
+
+    scaler = MarginScaler(capacity=100, min_samples=1000)  # stays in the neutral 0.5 regime
+    state = np.random.rand(7)
+    action, size_fraction = select_action_and_size(state, net, epsilon=0.0, n_actions=3, scaler=scaler)
+
+    assert action == 1
+    assert np.isclose(size_fraction, 0.01 + 0.5 * (0.90 - 0.01))
 
 
 # ---------- select_portfolio_actions ----------

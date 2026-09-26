@@ -1,22 +1,24 @@
-"""Unit tests for the multi-stock trading environment — Iteration 2."""
+"""Unit tests for the multi-stock trading environment: Iteration 2."""
 import numpy as np
 import pandas as pd
 from src.trading_env import TradingEnv
 
 
 def make_fake_stock(prices):
+    # build a fake price dataframe with the normalized columns the env expects
     n = len(prices)
     return pd.DataFrame({
         "Close": prices,
-        "Close_norm": np.linspace(0, 1, n),
-        "MA10_norm": np.linspace(0, 1, n),
+        "Ret_1d_norm": np.linspace(0, 1, n),
+        "Close_vs_MA10_norm": np.linspace(0, 1, n),
         "RSI_norm": np.linspace(0, 1, n),
-        "MACD_norm": np.linspace(0, 1, n),
-        "MACD_Signal_norm": np.linspace(0, 1, n),
+        "MACD_pct_norm": np.linspace(0, 1, n),
+        "MACD_Signal_pct_norm": np.linspace(0, 1, n),
     })
 
 
 def make_env():
+    # set up a two-stock environment with distinct price paths
     price_data = {
         "AAPL": make_fake_stock([100, 102, 105, 103, 106]),
         "TSLA": make_fake_stock([200, 198, 205, 210, 208]),
@@ -32,13 +34,15 @@ def test_reset_returns_obs_per_ticker():
 
 
 def test_portfolio_value_consistency():
+    # check portfolio_value matches cash plus holdings priced at the NEW day's close,
+    # since current_step has already advanced by the time step() returns
     env = make_env()
     env.reset()
     actions = {"AAPL": (1, 0.5), "TSLA": (1, 0.3)}
     obs, reward, terminated, truncated, info = env.step(actions)
 
     expected_value = info["cash"] + sum(
-        info["shares_held"][t] * env._get_price(t, step=env.current_step - 1)
+        info["shares_held"][t] * env._get_price(t, step=env.current_step)
         for t in env.tickers
     )
     assert np.isclose(info["portfolio_value"], expected_value)
@@ -88,6 +92,7 @@ def test_episode_ends_at_last_step():
         steps_taken += 1
     assert steps_taken == env.n_steps - 1
 
+
 # ---------- Per-stock reward (info["stock_rewards"]) ----------
 
 def test_stock_rewards_present_in_info():
@@ -100,29 +105,32 @@ def test_stock_rewards_present_in_info():
     assert set(info["stock_rewards"].keys()) == {"AAPL", "TSLA"}
 
 
-def test_stock_rewards_zero_on_first_buy():
-    # a stock going from 0 shares to some shares has no prior position
-    # to compare against, so its first-step reward should be 0.0
+def test_stock_reward_reflects_price_move_when_held():
+    # a stock bought today is still "held after today's trades", so its reward
+    # is the actual close-to-close price move, not zero just because it's a new position
     env = make_env()
     env.reset()
     actions = {"AAPL": (1, 0.5), "TSLA": (0, 0.0)}
     obs, reward, terminated, truncated, info = env.step(actions)
 
-    assert info["stock_rewards"]["AAPL"] == 0.0
-    assert info["stock_rewards"]["TSLA"] == 0.0
+    aapl_price_today = env._get_price("AAPL", step=0)
+    aapl_price_next = env._get_price("AAPL", step=1)
+    expected_aapl_reward = (aapl_price_next - aapl_price_today) / aapl_price_today
+
+    assert np.isclose(info["stock_rewards"]["AAPL"], expected_aapl_reward)
+    assert info["stock_rewards"]["TSLA"] == 0.0  # never bought, so not held
 
 
 def test_stock_rewards_differ_per_stock():
-    # build a scenario where one stock rises and another falls,
-    # after both already hold a position, so rewards should genuinely differ
+    # build a scenario where two stocks move by different amounts after both
+    # already hold a position, so their rewards should genuinely differ
     env = make_env()
     env.reset()
 
     # day 1: buy into both, establishing a position
     env.step({"AAPL": (1, 0.9), "TSLA": (1, 0.9)})
 
-    # day 2: hold both, but prices moved differently for each (AAPL up, TSLA down
-    # in the fake data set up in make_env)
+    # day 2: hold both, but the fake prices move by different amounts for each
     obs, reward, terminated, truncated, info = env.step(
         {"AAPL": (0, 0.0), "TSLA": (0, 0.0)}
     )
@@ -132,11 +140,14 @@ def test_stock_rewards_differ_per_stock():
     assert aapl_reward != tsla_reward
 
 
-def test_stock_rewards_reset_correctly_between_episodes():
+def test_state_resets_correctly_between_episodes():
+    # after a step changes cash and holdings, reset() should return to the
+    # initial episode state rather than carrying anything over
     env = make_env()
     env.reset()
     env.step({"AAPL": (1, 0.5), "TSLA": (0, 0.0)})
 
-    # start a fresh episode
     obs, info = env.reset()
-    assert env.stock_values == {t: 0.0 for t in env.tickers}
+    assert env.cash == env.initial_cash
+    assert env.shares_held == {t: 0 for t in env.tickers}
+    assert env.effective_action == {t: 0 for t in env.tickers}

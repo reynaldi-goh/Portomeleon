@@ -1,29 +1,21 @@
 """Terminal-level multi-stock simulation demo.
 
-Three stages, matching the Portomeleon app design:
-
-1. Train, fit the DQN on the FULL 2-year history of the training basket
-   (8 stocks, spread across sectors), for each (alpha, n_episodes) combo.
-2. Test, freeze each trained model, score it on 3 DISJOINT test baskets
-   (4 stocks each, none seen in training) over the FULL 2-year history.
+1. Train, fit the DQN on the FULL 2-year history of the training basket (8 stocks, spread across sectors), for each (alpha, n_episodes) combo.
+2. Test, freeze each trained model, score it on 3 DISJOINT test basket (4 stocks each, none seen in training) over the FULL 2-year history.
    This tests generalization to unseen tickers, not just unseen dates.
-   A combo's score is the AVERAGE excess return over buy-and-hold across
-   the 3 test baskets, so one lucky (or unlucky) basket can't decide the winner.
-3. Simulation, the BEST scoring model, run day by day across a user-chosen
-   portfolio drawn from the TRAINING basket (Option A: the app's actual
+   A combo's score is the AVERAGE excess return over buy-and-hold across the 3 test baskets, so one lucky (or unlucky) basket can't decide the winner.
+3. Simulation, the BEST scoring model, run day by day across a user-chosen portfolio drawn from the TRAINING basket (Option A: the app's actual
    product constraint). This is the deployment/demo view.
 
-Model persistence: stage 1+2 (hyperparameter search + training) is the
-expensive part. Once a best model is found, its weights and frozen
-MarginScaler are saved to disk (see save_model/load_model below), so later
-runs can skip straight to stage 3 instead of retraining from scratch.
+Model persistence: stage 1+2 (hyperparameter search + training) is the expensive part. Once a best model is found, its weights and frozen
+MarginScaler are saved to disk (see save_model/load_model below), so later runs can skip straight to stage 3 instead of retraining from scratch.
 """
 
 import os
 import pickle
 
 from dotenv import load_dotenv
-load_dotenv()  # reads .env in the current directory and sets its vars into
+load_dotenv()  # read .env in the current directory and set its vars into
                 # os.environ, e.g. GROQ_API_KEY -- so `advisor.py`'s
                 # os.environ.get("GROQ_API_KEY") picks it up without you
                 # needing to `export` it in the shell every session
@@ -45,7 +37,7 @@ from src.agent import (
 )
 from src.advisor import Advisor, build_day_facts
 
-# fix a seed so every hyperparameter combo starts from the same random state,
+# fix a seed for better reproducibility
 # making the grid an actual controlled comparison instead of luck
 RANDOM_SEED = 42
 
@@ -58,7 +50,7 @@ TRAINING_TICKERS = ["AAPL", "NVDA", "JPM", "JNJ", "XOM", "PG", "DIS", "KO"]
 # test baskets: 3 different combinations of stocks the model never saw in
 # training. Each basket has one stock per broad sector already represented in
 # training (tech, financials, healthcare, energy/staples), so this tests
-# generalization to unseen companies in familiar sectors, not an unfair extrapolation.
+# generalization to unseen companies in familiar sectors.
 # The baskets don't overlap each other, so each one is an independent test.
 TEST_BASKETS = {
     "A": ["MSFT", "BAC", "PFE", "CVX"],
@@ -172,7 +164,7 @@ def calibrate_scaler(env, q_net, n_actions, capacity=20000):
     scaler.freeze()
     return scaler
 
-
+# this is the baseline model
 def compute_buy_and_hold_value(price_data, tickers, initial_cash, step):
     # value an equal-split, buy-on-day-0, never-trade portfolio for comparison
     cash_per_ticker = initial_cash / len(tickers)
@@ -221,7 +213,7 @@ def run_stepper(env, q_net, n_actions, price_data, interactive=True, label="Run"
             print(f"  Cash: ${info['cash']:.2f} | Shares: {info['shares_held']}")
             print(f"  Drawdown from peak: {drawdown:.1%} | Rolling Sharpe (last {env.sharpe_window}d): {sharpe_note}")
 
-        # remember what the bot saw before it acts, so the advisor can explain it afterwards
+        # capture what the bot saw before it acts, so the advisor can explain it afterwards
         explain = advisor is not None and interactive
         if explain:
             decision_day = env.current_step
@@ -276,8 +268,7 @@ def run_stepper(env, q_net, n_actions, price_data, interactive=True, label="Run"
 def score_test_run(info, env, price_data):
     """Score ONE test basket run against its own buy-and-hold benchmark.
 
-    Returns a dict. "excess_return" is the number the hyperparameter search
-    averages across baskets: how much better (or worse) the model did than
+    Returns a dict. "excess_return" is the number the hyperparameter search averages across baskets: how much better (or worse) the model did than
     simply buying equal amounts on day 0 and never trading.
     """
     benchmark = compute_buy_and_hold_value(
@@ -302,11 +293,10 @@ def run_hyperparameter_search(training_tickers=TRAINING_TICKERS, test_baskets=TE
     """Stages 1 and 2, repeated once per (alpha, n_episodes) combo.
 
     Train uses the full pinned history of training_tickers (dates set in data_layer).
-    Test uses the same window for EACH basket in test_baskets, all disjoint from
-    training, so this measures generalization to unseen stocks. A combo's score
-    is the average excess return over buy-and-hold across all test baskets.
+    Test uses the same window for EACH basket in test_baskets, all disjoint from training, so this measures generalization to unseen stocks. 
+    A combo's score is the average excess return over buy-and-hold across all test baskets.
     """
-    # every test stock must be one the model never saw in training
+    # check every test stock is one the model never saw in training
     for name, tickers in test_baskets.items():
         overlap = [t for t in tickers if t in training_tickers]
         if overlap:
@@ -464,7 +454,7 @@ if __name__ == "__main__":
         print(f"Loading saved model from {MODEL_PATH} (skipping search + training)...")
         q_net, n_actions, scaler, best_combo = load_model(MODEL_PATH)
 
-        # still need train_data for stage 3 — this is just loading/normalizing
+        # still need train_data for stage 3, this is just loading/normalizing
         # price data, not training, so it stays cheap
         train_data_raw, _ = load_training_basket(TRAINING_TICKERS)
         train_data = align_dates(train_data_raw)

@@ -8,13 +8,14 @@ Three pages, switched with st.session_state.page (no sidebar):
 
     dashboard --new simulation--> setup --start--> simulation --end--> dashboard
 
-Deferred to a later version: the specific-stock page (chart with buy/sell
-markers) and the company details page.
+Deferred to a later version: the specific-stock page and the company
+details page.
 """
 
 import os
 import re
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -27,10 +28,14 @@ from src.simulation import (
     load_last_simulation, load_user_stocks, save_last_simulation,
 )
 
-QUICK_SUGGESTIONS = ["AAPL", "TSLA", "META", "NVDA"]
+COMMON_TICKERS = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "AVGO", "LLY",
+    "JPM", "V", "MA", "UNH", "XOM", "JNJ", "PG", "HD", "COST", "ABBV",
+    "MRK", "CVX", "KO", "PEP", "ADBE", "CRM", "BAC", "WMT", "DIS", "NFLX",
+]
 STEP_BUTTON_DAYS = 5
 
-st.set_page_config(page_title="Portomeleon", page_icon="📈", layout="centered")
+st.set_page_config(page_title="Portomeleon", layout="centered")
 
 
 # ------------------------------------------------------------------- helpers
@@ -79,15 +84,39 @@ def holdings_table(rows):
         "Day change": f"{r['Day change']:+.1%}",
         "Shares": r["Shares"],
         "Value": money(r["Value"]),
-        "Last action": r["Last action"],
+        "Last action": r.get("Last action", r.get("Action taken", "-")),
+        "Action taken": r.get("Action taken", r.get("Last action", "-")),
     } for r in rows])
 
 
 def history_frame(history):
-    return pd.DataFrame(
-        {"Bot portfolio": history["portfolio"], "Buy and hold": history["buy_and_hold"]},
-        index=pd.to_datetime(history["dates"]),
+    actions = history.get("actions", [{}] * len(history["dates"]))
+    return pd.DataFrame({
+        "Date": pd.to_datetime(history["dates"]),
+        "Bot portfolio": history["portfolio"],
+        "Buy and hold": history["buy_and_hold"],
+        # a day counts as a "buy day" / "sell day" if the bot bought/sold ANY held stock
+        "Buy day": [any(a == "BUY" for a in day.values()) for day in actions],
+        "Sell day": [any(a == "SELL" for a in day.values()) for day in actions],
+    })
+
+
+def history_chart(df):
+    """Portfolio-vs-benchmark line chart, with a marker on every day the bot bought or sold."""
+    base = alt.Chart(df).encode(x=alt.X("Date:T", title=None))
+    lines = base.transform_fold(
+        ["Bot portfolio", "Buy and hold"], as_=["Series", "Value"]
+    ).mark_line().encode(
+        y=alt.Y("Value:Q", title="Value ($)"),
+        color=alt.Color("Series:N", title=None),
     )
+    buys = base.transform_filter("datum['Buy day']").mark_point(
+        shape="triangle-up", size=100, color="green", filled=True,
+    ).encode(y=alt.Y("Bot portfolio:Q"), tooltip=[alt.Tooltip("Date:T", title="Buy day")])
+    sells = base.transform_filter("datum['Sell day']").mark_point(
+        shape="triangle-down", size=100, color="red", filled=True,
+    ).encode(y=alt.Y("Bot portfolio:Q"), tooltip=[alt.Tooltip("Date:T", title="Sell day")])
+    return (lines + buys + sells).properties(height=320).interactive()
 
 
 def show_text(text):
@@ -120,6 +149,11 @@ def add_typed():
     add_tickers(st.session_state.typed_tickers)
 
 
+def add_from_dropdown():
+    # runs as the multiselect's on_change callback
+    add_tickers(" ".join(st.session_state.common_tickers_select))
+
+
 def remove_ticker(t):
     st.session_state.picked.remove(t)
     st.session_state.setup_msg = None
@@ -135,13 +169,13 @@ def page_setup(res):
     if st.session_state.setup_msg:
         st.warning(st.session_state.setup_msg)
 
-    st.write("Quick suggestions")
-    for col, t in zip(st.columns(len(QUICK_SUGGESTIONS)), QUICK_SUGGESTIONS):
-        col.button(t, key=f"quick_{t}", on_click=add_tickers, args=(t,))
+    st.multiselect("Add from common tickers", COMMON_TICKERS,
+                   key="common_tickers_select", on_change=add_from_dropdown,
+                   placeholder="Choose one or more...")
 
     with st.form("add_stock", clear_on_submit=True):
-        st.text_input("Add stocks by ticker", key="typed_tickers",
-                      placeholder="e.g. MSFT, GOOGL or BRK-B")
+        st.text_input("Or type any other ticker", key="typed_tickers",
+                      placeholder="e.g. RIVN, BRK-B")
         st.form_submit_button("Add", on_click=add_typed)
 
     picked = st.session_state.picked
@@ -188,7 +222,8 @@ def page_simulation():
     for note in st.session_state.sim_notes:
         st.caption(note)
 
-    st.line_chart(history_frame(sim.chart_history()))
+    st.altair_chart(history_chart(history_frame(sim.chart_history())), width="stretch")
+    st.caption("Green triangle = bot bought that day. Red triangle = bot sold that day.")
     st.dataframe(holdings_table(sim.holdings()), hide_index=True)
 
     m = sim.metrics()
@@ -256,7 +291,7 @@ def page_dashboard():
     st.caption(f"{', '.join(last['tickers'])} | {last['start_date']} to {last['end_date']} "
                f"({last['days']} trading days)")
     left, right = st.columns([3, 1])
-    left.line_chart(history_frame(last["history"]))
+    left.altair_chart(history_chart(history_frame(last["history"])), width="stretch")
     right.metric("Total value", money(m["total_value"]))
     right.metric("Performance", f"{m['cumulative_return']:+.1%}")
 
@@ -273,7 +308,7 @@ def page_dashboard():
 # ----------------------------------------------------------------------- main
 
 def main():
-    st.title("📈 Portomeleon")
+    st.title("Portomeleon")
 
     if "page" not in st.session_state:
         st.session_state.page = "dashboard"
@@ -297,7 +332,7 @@ def main():
         page_dashboard()
 
     st.divider()
-    st.caption("Educational project. Not financial advice.")
+    st.caption("Disclaimer: Educational project only")
 
 
 main()

@@ -1,4 +1,4 @@
-"""Multi-stock trading environment — Iteration 2."""
+"""Multi-stock trading environment: Iteration 2."""
 
 import gymnasium as gym
 import numpy as np
@@ -25,12 +25,12 @@ class TradingEnv(gym.Env):
 
     def __init__(self, price_data, initial_cash=10000):
         super().__init__()
-        # price_data: dict of {ticker: dataframe}, all aligned to the same trading dates
+        # store price_data: dict of {ticker: dataframe}, all aligned to the same trading dates
         self.price_data = price_data
         self.tickers = list(price_data.keys())
         self.initial_cash = initial_cash
 
-        # 3 actions per stock: hold, buy, sell
+        # define 3 actions per stock: hold, buy, sell
         self.action_space = gym.spaces.Discrete(3)
 
         # observation per stock: 5 percentage-style features + 2 portfolio-context features
@@ -40,16 +40,17 @@ class TradingEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(self.n_features,), dtype=np.float32
         )
 
-        # assumes all tickers share the same number of trading days
+        # assume all tickers share the same number of trading days
         self.n_steps = len(price_data[self.tickers[0]])
 
-        # reward shaping parameters
+        # set reward shaping parameters
         self.sharpe_window = 20          # rolling window size for sharpe-style reward
         self.sharpe_min_history = 5      # minimum days before sharpe kicks in
         self.drawdown_penalty_weight = 0.5  # how harshly drawdown is punished
         self.idle_penalty_weight = 0.01     # opportunity cost for sitting in cash
 
     def reset(self, seed=None, options=None):
+        # reinitialize the episode's cash, holdings, and portfolio state
         super().reset(seed=seed)
         self.current_step = 0
         self.cash = self.initial_cash
@@ -57,13 +58,14 @@ class TradingEnv(gym.Env):
         self.portfolio_value = self.initial_cash
         self.effective_action = {ticker: 0 for ticker in self.tickers}
 
-        # reward-shaping state, reset each episode
+        # reset reward-shaping state for the new episode
         self.return_history = []
         self.peak_value = self.initial_cash
 
         return self._get_obs(), self._get_info()
 
     def _get_price(self, ticker, step=None):
+        # look up a ticker's closing price at the given step (or the current step)
         step = self.current_step if step is None else step
         return self.price_data[ticker].iloc[step]["Close"]
 
@@ -86,6 +88,7 @@ class TradingEnv(gym.Env):
         return obs
 
     def _get_info(self):
+        # package current portfolio state for logging and debugging
         return {
             "portfolio_value": self.portfolio_value,
             "effective_action": dict(self.effective_action),
@@ -95,38 +98,38 @@ class TradingEnv(gym.Env):
 
     def _compute_reward(self, prev_value):
         """Rolling Sharpe-style reward, penalized for drawdown from the episode's peak,
-        with a small opportunity-cost penalty for sitting in cash — otherwise the agent
+        with a small opportunity-cost penalty for sitting in cash, otherwise the agent
         can dodge the drawdown penalty for free by simply not being in the market.
 
         prev_value: portfolio value right after today's trades (at today's close).
         self.portfolio_value: value at the next day's close. The difference is
         the return earned by the position chosen today.
         """
+        # measure the return earned since the last trade
         raw_return = (self.portfolio_value - prev_value) / prev_value
         self.return_history.append(raw_return)
 
-        # rolling sharpe component: mean return / std return, over a sliding window
+        # compute a rolling sharpe component: mean return over std return, over a sliding window
         window = self.return_history[-self.sharpe_window:]
         if len(window) < self.sharpe_min_history:
-            # not enough history yet, fall back to raw return
-            sharpe_component = raw_return
+            sharpe_component = raw_return  # fall back to raw return until there's enough history
         else:
             mean_return = np.mean(window)
             std_return = max(np.std(window), 0.005)  # floor at realistic daily vol, not near-zero
             sharpe_component = np.clip(mean_return / std_return, -3.0, 3.0)  # cap outliers
 
-        # drawdown penalty: how far below the episode's peak we currently are
+        # penalize how far below the episode's peak the portfolio currently sits
         self.peak_value = max(self.peak_value, self.portfolio_value)
         drawdown = (self.peak_value - self.portfolio_value) / self.peak_value
 
-        # opportunity cost: being in cash isn't free just because it dodges drawdown
+        # charge a small opportunity cost for holding cash, so idling isn't a free lunch
         cash_fraction = self.cash / self.portfolio_value if self.portfolio_value > 0 else 1.0
         idle_penalty = self.idle_penalty_weight * cash_fraction
 
         return sharpe_component - self.drawdown_penalty_weight * drawdown - idle_penalty
 
     def step(self, actions):
-        # today's close: the price the agent just observed, and the price it trades at
+        # read today's close: the price the agent just observed, and the price it trades at
         today_prices = {t: self._get_price(t) for t in self.tickers}
 
         buy_tickers = [t for t, (a, _) in actions.items() if a == 1]
@@ -162,6 +165,7 @@ class TradingEnv(gym.Env):
                 self.effective_action[ticker] = 0
 
         if buy_tickers:
+            # split available cash across the buy tickers, weighted by confidence
             size_fractions = {t: actions[t][1] for t in buy_tickers}
             total_size = sum(size_fractions.values())
             cash_pool = min(total_size, 1.0) * self.cash
@@ -170,8 +174,7 @@ class TradingEnv(gym.Env):
                 weight = size_fractions[ticker] / total_size if total_size > 0 else 1 / len(buy_tickers)
                 cash_for_stock = cash_pool * weight
                 price = today_prices[ticker]
-                # round buys down only; never spend more than the allocated cash
-                shares_to_buy = int(cash_for_stock // price)
+                shares_to_buy = int(cash_for_stock // price)  # round down, never overspend the allocation
                 if shares_to_buy > 0:
                     self.cash -= shares_to_buy * price
                     self.shares_held[ticker] += shares_to_buy
@@ -179,20 +182,20 @@ class TradingEnv(gym.Env):
                 else:
                     self.effective_action[ticker] = 0
 
-        # portfolio value right after today's trades, still at today's prices
+        # value the portfolio right after today's trades, still at today's prices
         # (a trade swaps cash for shares at the same price, so nothing is gained or lost yet)
         value_after_trades = self.cash + sum(
             self.shares_held[t] * today_prices[t] for t in self.tickers
         )
 
-        # move to the next day and revalue everything at the NEW day's close
+        # advance to the next day and revalue everything at the new day's close
         self.current_step += 1
         next_prices = {t: self._get_price(t) for t in self.tickers}
         self.portfolio_value = self.cash + sum(
             self.shares_held[t] * next_prices[t] for t in self.tickers
         )
 
-        # per-stock reward: the price move from today's close to the next close,
+        # measure the per-stock reward: the price move from today's close to the next close,
         # only for stocks actually held after today's trades
         stock_rewards = {}
         for t in self.tickers:

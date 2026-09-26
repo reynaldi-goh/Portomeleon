@@ -3,55 +3,55 @@ import os
 import yfinance as yf
 import pandas as pd
 
-# the 5 percentage-style features the model sees. They mean the same thing for a
-# $40 stock and a $400 stock, so what the model learns carries over to unseen stocks.
+# list the 5 percentage-style features the model sees, so a $40 stock and a
+# $400 stock look the same to it and what it learns carries over to unseen stocks
 FEATURE_COLUMNS = ["Ret_1d", "Close_vs_MA10", "RSI", "MACD_pct", "MACD_Signal_pct"]
 
-# fixed date window, so every run (and anyone reading the repo) sees the same data.
-# yfinance treats the end date as exclusive, so the last day included is Fri 2026-09-18.
+# fix the date window for every run, so results stay the same no matter when you run it
+# (yfinance treats the end date as exclusive, so the last day included is Fri 2026-09-18)
 START_DATE = "2024-09-19"
 END_DATE = "2026-09-19"
 
-# downloaded prices are saved in <project root>/data, so each ticker is downloaded only once
+# set the cache folder for downloaded prices, so each ticker is downloaded only once
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
 
 def add_rsi(df, period=14):
-    # compute RSI from average gains and losses over a rolling period
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    # compute RSI for measuring how overbought/oversold a stock is
+    delta = df["Close"].diff()  # measure day-to-day price change
+    gain = delta.clip(lower=0)  # keep only the up-moves as gains
+    loss = -delta.clip(upper=0)  # keep only the down-moves as losses (made positive)
 
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
+    avg_gain = gain.rolling(window=period).mean()  # average gains over the rolling window
+    avg_loss = loss.rolling(window=period).mean()  # average losses over the rolling window
 
-    rs = avg_gain / avg_loss
-    df["RSI"] = 100 - (100 / (1 + rs))
+    rs = avg_gain / avg_loss  # divide average gain by average loss for the RS ratio
+    df["RSI"] = 100 - (100 / (1 + rs))  # convert RS into the standard 0-100 RSI scale
     return df
 
 
 def add_macd(df, fast=12, slow=26, signal=9):
-    # compute MACD line and signal line from fast/slow EMAs
-    ema_fast = df["Close"].ewm(span=fast, adjust=False).mean()
-    ema_slow = df["Close"].ewm(span=slow, adjust=False).mean()
+    # compute MACD for tracking momentum via the gap between fast/slow trend lines
+    ema_fast = df["Close"].ewm(span=fast, adjust=False).mean()  # track the short-term trend
+    ema_slow = df["Close"].ewm(span=slow, adjust=False).mean()  # track the long-term trend
 
-    df["MACD"] = ema_fast - ema_slow
-    df["MACD_Signal"] = df["MACD"].ewm(span=signal, adjust=False).mean()
+    df["MACD"] = ema_fast - ema_slow  # measure the gap between the two trends
+    df["MACD_Signal"] = df["MACD"].ewm(span=signal, adjust=False).mean()  # smooth MACD for a signal line
     return df
 
 
 def add_moving_average(df, window=10, col_name="MA10"):
-    # compute a simple moving average over closing price
+    # compute a simple moving average for smoothing out daily price noise
     df[col_name] = df["Close"].rolling(window=window).mean()
     return df
 
 
 def add_percent_features(df):
-    # turn dollar-based values into percentages, so they mean the same for any stock price
-    df["Ret_1d"] = df["Close"].pct_change()               # how much the price moved today
-    df["Close_vs_MA10"] = df["Close"] / df["MA10"] - 1    # how far above/below its 10-day average
-    df["MACD_pct"] = df["MACD"] / df["Close"]             # MACD as a share of the price
-    df["MACD_Signal_pct"] = df["MACD_Signal"] / df["Close"]
+    # convert dollar-based values into percentages, so they mean the same for any stock price
+    df["Ret_1d"] = df["Close"].pct_change()               # measure how much the price moved today
+    df["Close_vs_MA10"] = df["Close"] / df["MA10"] - 1    # measure distance above/below its 10-day average
+    df["MACD_pct"] = df["MACD"] / df["Close"]             # express MACD as a share of the price
+    df["MACD_Signal_pct"] = df["MACD_Signal"] / df["Close"]  # express MACD signal as a share of the price
     return df
 
 
@@ -62,11 +62,11 @@ def normalize_features(df, columns, ref_df=None):
     test-basket tickers are scaled using the TRAIN-basket's statistics,
     the same scale the model learned on, not their own.
     """
-    reference = ref_df if ref_df is not None else df
+    reference = ref_df if ref_df is not None else df  # choose which stats to scale against
     for col in columns:
-        col_mean = reference[col].mean()
-        col_std = reference[col].std()
-        df[col + "_norm"] = ((df[col] - col_mean) / col_std).clip(-5, 5)
+        col_mean = reference[col].mean()  # find the reference mean for this column
+        col_std = reference[col].std()    # find the reference spread for this column
+        df[col + "_norm"] = ((df[col] - col_mean) / col_std).clip(-5, 5)  # scale and cap outliers
     return df
 
 
@@ -78,21 +78,21 @@ def load_prices(ticker, start=START_DATE, end=END_DATE):
     results never change with the day you run. Delete the file to force a
     fresh download.
     """
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)  # create the cache folder if it's missing
     path = os.path.join(CACHE_DIR, f"{ticker}_{start}_{end}.csv")
 
     if os.path.exists(path):
-        return pd.read_csv(path, index_col=0, parse_dates=True)
+        return pd.read_csv(path, index_col=0, parse_dates=True)  # reuse the cached file
 
-    df = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=True)
+    df = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=True)  # download fresh prices
     if df.empty:
         raise ValueError(f"No price data downloaded for {ticker} ({start} to {end}).")
-    df = df[["Close"]].copy()
+    df = df[["Close"]].copy()  # keep only the closing price column
 
-    # keep plain dates (no timezone), so the saved file reads back cleanly
+    # strip the timezone, so the saved file reads back cleanly on any machine
     df.index = df.index.tz_localize(None).normalize()
     df.index.name = "Date"
-    df.to_csv(path)
+    df.to_csv(path)  # save the download so future runs skip the network call
     return df
 
 
@@ -103,16 +103,16 @@ def fetch_and_engineer(ticker, start=START_DATE, end=END_DATE):
     Normalization happens separately, since it depends on which reference
     statistics to use.
     """
-    df = load_prices(ticker, start, end)
+    df = load_prices(ticker, start, end)  # get raw closing prices
 
-    # add indicators, then turn them into percentage-style features
+    # add each indicator, then turn them into percentage-style features
     df = add_moving_average(df, window=10, col_name="MA10")
     df = add_rsi(df)
     df = add_macd(df)
     df = add_percent_features(df)
 
-    # drop warm-up rows with missing indicator values, but KEEP the dates as the
-    # index, so align_dates can line tickers up by real date
+    # drop warm-up rows with missing indicator values, but keep the date index, so
+    # align_dates can line tickers up by real calendar date afterward
     df = df.dropna()
     return df
 
@@ -124,15 +124,15 @@ def load_training_basket(tickers, start=START_DATE, end=END_DATE):
     data together, so the scale reflects the whole basket rather than
     any single stock's own range.
     """
-    raw = {t: fetch_and_engineer(t, start, end) for t in tickers}
+    raw = {t: fetch_and_engineer(t, start, end) for t in tickers}  # build features per ticker
 
-    # build one shared reference dataframe from all training tickers combined
+    # combine every training ticker's rows into one shared reference table
     reference = pd.concat(raw.values(), ignore_index=True)
 
     normalized = {
         t: normalize_features(df.copy(), columns=FEATURE_COLUMNS, ref_df=reference)
         for t, df in raw.items()
-    }
+    }  # scale each ticker against the pooled reference stats
     return normalized, reference
 
 
@@ -141,11 +141,11 @@ def load_test_basket(tickers, train_reference, start=START_DATE, end=END_DATE):
     TRAINING basket's reference statistics — never the test tickers' own —
     so scaling stays consistent with what the model was trained on.
     """
-    raw = {t: fetch_and_engineer(t, start, end) for t in tickers}
+    raw = {t: fetch_and_engineer(t, start, end) for t in tickers}  # build features per test ticker
     normalized = {
         t: normalize_features(df.copy(), columns=FEATURE_COLUMNS, ref_df=train_reference)
         for t, df in raw.items()
-    }
+    }  # scale each test ticker against the training basket's stats
     return normalized
 
 
@@ -156,10 +156,10 @@ def align_dates(data_dict):
     date, not by row number. Prints a note if any rows had to be dropped.
     """
     tickers = list(data_dict.keys())
-    common_dates = data_dict[tickers[0]].index
+    common_dates = data_dict[tickers[0]].index  # start from the first ticker's dates
     for t in tickers[1:]:
-        common_dates = common_dates.intersection(data_dict[t].index)
-    common_dates = common_dates.sort_values()
+        common_dates = common_dates.intersection(data_dict[t].index)  # keep only shared dates
+    common_dates = common_dates.sort_values()  # put the shared dates back in order
 
     if len(common_dates) == 0:
         raise ValueError("No trading dates are shared by all tickers.")
@@ -169,4 +169,4 @@ def align_dates(data_dict):
         if dropped > 0:
             print(f"align_dates: {t} had {dropped} date(s) not shared by every ticker, dropped")
 
-    return {t: data_dict[t].loc[common_dates].reset_index(drop=True) for t in tickers}
+    return {t: data_dict[t].loc[common_dates].reset_index(drop=True) for t in tickers}  # trim each ticker to the shared dates

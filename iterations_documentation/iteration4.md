@@ -14,7 +14,7 @@ The goal of this iteration was to get the three previously separate modules, the
 - `compute_buy_and_hold_value()` implements the baseline: an equal cash split across the given tickers, bought once on day 0 and never traded again. This is used two ways, printed alongside the portfolio value on every simulated day so the comparison is visible in the terminal output, and inside `score_test_run()`, where a combo's `excess_return` is its final portfolio value against this same benchmark.
 - `save_model()` and `load_model()` persist and restore the network's weights, the frozen `MarginScaler`, and the winning hyperparameters together, so a later run can skip stages 1 and 2 entirely and go straight to stage 3.
 
-Tests were added in `tests/test_main.py`, covering the boundaries between modules that hadn't been exercised together before.
+Tests were added in `tests/test_integration.py`, covering the boundaries between modules that hadn't been exercised together before.
 
 ## Design Decisions
 
@@ -22,13 +22,13 @@ Integration testing at pipeline scope: this iteration checks the data layer, env
 
 Buy-and-hold as the baseline: a model that beats a raw price increase isn't necessarily good if the market as a whole was rising, and a model that loses money isn't necessarily bad if it lost less than the market did. Buy-and-hold isolates the specific question this project needs answered, is actively trading with this policy better than doing nothing, by holding everything else (which stocks, how much cash, how long) constant between the two.
 
-Synthetic data for most tests, one opt-in real-data check: `test_main.py` follows the same approach as the earlier iterations, small hand built price series for fast, deterministic tests that don't depend on the network. One test is marked separately and left opt-in, confirming that `load_training_basket()`'s real output actually satisfies what `TradingEnv` expects, since that specific boundary, real data layer output feeding the environment, had not been exercised together anywhere before this iteration.
+Synthetic data for most tests, one opt-in real-data check: `test_integration.py` follows the same approach as the earlier iterations, small hand built price series for fast, deterministic tests that don't depend on the network. One test is marked separately and left opt-in, confirming that `load_training_basket()`'s real output actually satisfies what `TradingEnv` expects, since that specific boundary, real data layer output feeding the environment, had not been exercised together anywhere before this iteration.
 
 Persisting the trained model separately from training it: `save_model()` and `load_model()` exist so stages 1 and 2, the expensive part, only need to run once. This matters beyond convenience for this iteration: the advisor layer in Iteration 5 needs to load a finished, frozen model without re-running a multi-combo hyperparameter search every time, so this needed to be in place before that work could start.
 
 ## Testing
 
-Integration tests were written in `tests/test_main.py` using pytest, focused on the connections between modules rather than any one module's internal correctness, which is already covered by Iterations 1 through 3's own test files.
+Integration tests were written in `tests/test_integration.py` using pytest, focused on the connections between modules rather than any one module's internal correctness, which is already covered by Iterations 1 through 3's own test files.
 
 - `test_select_portfolio_actions_output_consumed_by_env_step` confirms the agent's action dictionary is exactly the shape `TradingEnv.step()` expects.
 - `test_train_runs_end_to_end_and_updates_weights` confirms a short training run actually changes the network's weights, not just that it runs without error.

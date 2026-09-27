@@ -1,4 +1,5 @@
 yfinance
+gymnasium
 pytest
 torch
 groq
